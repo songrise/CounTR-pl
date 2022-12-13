@@ -16,10 +16,9 @@ from torch.utils.data import Dataset
 import torchvision
 from torchvision import transforms
 import torchvision.transforms.functional as TF
-
+from util.FSC147 import FSC147
 import timm
 
-assert timm.__version__ == "0.3.2"  # version check
 
 import util.misc as misc
 from models import models_mae_cross
@@ -59,7 +58,7 @@ def get_args_parser():
                         help='epochs to warmup LR')
 
     # Dataset parameters
-    parser.add_argument('--data_path', default='./data/FSC147/', type=str,
+    parser.add_argument('--data_path', default='./data/', type=str,
                         help='dataset path')
 
     parser.add_argument('--output_dir', default='./image',
@@ -93,80 +92,6 @@ def get_args_parser():
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = '1'
 
-# load data from FSC147
-data_path = './data/'
-anno_file = data_path + 'annotation_FSC147_384.json'
-data_split_file = data_path + 'Train_Test_Val_FSC_147.json'
-im_dir = data_path + 'images_384_VarV2'
-gt_dir = data_path + 'gt_density_map_adaptive_384_VarV2'
-
-with open(anno_file) as f:
-    annotations = json.load(f)
-
-with open(data_split_file) as f:
-    data_split = json.load(f)
-
-class TestData(Dataset):
-    def __init__(self):
-        
-        self.img = data_split['test']
-        self.img_dir = im_dir
-
-    def __len__(self):
-        return len(self.img)
-
-    def __getitem__(self, idx):
-        im_id = self.img[idx]
-        anno = annotations[im_id]
-        bboxes = anno['box_examples_coordinates']
-
-        dots = np.array(anno['points'])
-
-        image = Image.open('{}/{}'.format(im_dir, im_id))
-        image.load() 
-        W, H = image.size
-
-        new_H = 16*int(H/16)
-        new_W = 16*int(W/16)
-        scale_factor = float(new_W)/ W
-        image = transforms.Resize((new_H, new_W))(image)
-        Normalize = transforms.Compose([transforms.ToTensor()])
-        image = Normalize(image)
-
-        rects = list()
-        for bbox in bboxes:
-            x1 = int(bbox[0][0]*scale_factor)
-            y1 = bbox[0][1]
-            x2 = int(bbox[2][0]*scale_factor)
-            y2 = bbox[2][1]
-            rects.append([y1, x1, y2, x2])
-
-        boxes = list()
-        cnt = 0
-        for box in rects:
-            cnt+=1
-            if cnt>3:
-                break
-            box2 = [int(k) for k in box]
-            y1, x1, y2, x2 = box2[0], box2[1], box2[2], box2[3]
-            bbox = image[:,y1:y2+1,x1:x2+1]
-            bbox = transforms.Resize((64, 64))(bbox)
-            boxes.append(bbox.numpy())
-
-        boxes = np.array(boxes)
-        boxes = torch.Tensor(boxes)
-
-        # Only for visualisation purpose, no need for ground truth density map indeed.
-        gt_map = np.zeros((image.shape[1], image.shape[2]),dtype='float32')
-        for i in range(dots.shape[0]):
-            gt_map[min(new_H-1,int(dots[i][1]))][min(new_W-1,int(dots[i][0]*scale_factor))]=1
-        gt_map = ndimage.gaussian_filter(gt_map, sigma=(1, 1), order=0)
-        gt_map = torch.from_numpy(gt_map)
-        gt_map = gt_map *60
-        
-        sample = {'image':image,'dots':dots, 'boxes':boxes, 'pos':rects, 'gt_map':gt_map}
-        return sample['image'], sample['dots'], sample['boxes'], sample['pos'] ,sample['gt_map']
-
 
 def main(args):
     misc.init_distributed_mode(args)
@@ -183,7 +108,7 @@ def main(args):
 
     cudnn.benchmark = True
 
-    dataset_test = TestData()
+    dataset_test = FSC147(args.data_path, 'test')
     print(dataset_test)
 
     if True:  # args.distributed:

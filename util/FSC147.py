@@ -7,7 +7,8 @@ import cv2
 import torchvision.transforms.functional as TF
 import scipy.ndimage as ndimage
 from PIL import Image
-
+from torch.utils.data import Dataset
+import os
 import imgaug as ia
 import imgaug.augmenters as iaa
 from imgaug.augmentables import Keypoint, KeypointsOnImage
@@ -17,28 +18,120 @@ MAX_HW = 384
 IM_NORM_MEAN = [0.485, 0.456, 0.406]
 IM_NORM_STD = [0.229, 0.224, 0.225]
 
-data_path = './data/'
-im_dir = data_path + 'images_384_VarV2'
 
-anno_file = data_path + 'annotation_FSC147_384.json'
-data_split_file = data_path + 'Train_Test_Val_FSC_147.json'
-class_file = data_path + 'ImageClasses_FSC147.txt'
 
-with open(anno_file) as f:
-    annotations = json.load(f)
+class FSC147(Dataset):
+    def __init__(self, data_dir:str, split:str):
+        assert split in ['train', 'val', 'test']
 
-with open(data_split_file) as f:
-    data_split = json.load(f)
+        self.data_dir = data_dir
+        self.im_dir = os.path.join(data_dir,'images_384_VarV2')
+        self.gt_dir = os.path.join(data_dir, 'gt_density_map_adaptive_384_VarV2')
+        self.anno_file = os.path.join(data_dir, 'annotation_FSC147_384.json')
+        self.data_split_file = os.path.join(data_dir, 'Train_Test_Val_FSC_147.json')
+        self.class_file = os.path.join(data_dir, 'ImageClasses_FSC147.txt')
+        self.split = split
+        with open(self.data_split_file) as f:
+            data_split = json.load(f)
 
-class_dict = {}
-with open(class_file) as f:
-    for line in f:
-        key = line.split()[0]
-        val = line.split()[1:]
-        class_dict[key] = val
-train_set = data_split['train']
+        with open(self.anno_file) as f:
+            self.annotations = json.load(f)
 
-class resizePreTrainImage(object):
+        self.idx_running_set = data_split[split]
+
+
+        self.class_dict = {}
+        with open(self.class_file) as f:
+            for line in f:
+                key = line.split()[0]
+                val = line.split()[1:]
+                # concat word as string
+                val = ' '.join(val)
+                self.class_dict[key] = val
+        
+        self.transform = None
+        if self.split == 'train':
+            self.transform = transforms.Compose([ResizeTrainImage(MAX_HW, self)])
+
+        random.shuffle(self.idx_running_set)
+
+    def __len__(self):
+        return len(self.idx_running_set)
+
+    def __getitem__(self, idx):
+        im_id = self.idx_running_set[idx]
+        anno = self.annotations[im_id]
+        bboxes = anno['box_examples_coordinates']
+        #TODO Dec 13: add class label
+        if self.split == 'train' or self.split == 'val':
+            rects = list()
+            for bbox in bboxes:
+                x1 = bbox[0][0]
+                y1 = bbox[0][1]
+                x2 = bbox[2][0]
+                y2 = bbox[2][1]
+                rects.append([y1, x1, y2, x2])
+
+            dots = np.array(anno['points'])
+
+            image = Image.open('{}/{}'.format(self.im_dir, im_id))
+            image.load()
+            density_path = self.gt_dir + '/' + im_id.split(".jpg")[0] + ".npy"
+            density = np.load(density_path).astype('float32')   
+            m_flag = 0
+
+            sample = {'image':image,'lines_boxes':rects,'gt_density':density, 'dots':dots, 'id':im_id, 'm_flag': m_flag}
+
+            sample = self.transform(sample)
+            return sample['image'], sample['gt_density'], sample['boxes'], sample['m_flag']
+        elif self.split == "test":
+            dots = np.array(anno['points'])
+            image = Image.open('{}/{}'.format(self.im_dir, im_id))
+            image.load() 
+            W, H = image.size
+
+            new_H = 16*int(H/16)
+            new_W = 16*int(W/16)
+            scale_factor = float(new_W)/ W
+            image = transforms.Resize((new_H, new_W))(image)
+            Normalize = transforms.Compose([transforms.ToTensor()])
+            image = Normalize(image)
+
+            rects = list()
+            for bbox in bboxes:
+                x1 = int(bbox[0][0]*scale_factor)
+                y1 = bbox[0][1]
+                x2 = int(bbox[2][0]*scale_factor)
+                y2 = bbox[2][1]
+                rects.append([y1, x1, y2, x2])
+
+            boxes = list()
+            cnt = 0
+            for box in rects:
+                cnt+=1
+                if cnt>3:
+                    break
+                box2 = [int(k) for k in box]
+                y1, x1, y2, x2 = box2[0], box2[1], box2[2], box2[3]
+                bbox = image[:,y1:y2+1,x1:x2+1]
+                bbox = transforms.Resize((64, 64))(bbox)
+                boxes.append(bbox.numpy())
+
+            boxes = np.array(boxes)
+            boxes = torch.Tensor(boxes)
+
+            # Only for visualisation purpose, no need for ground truth density map indeed.
+            gt_map = np.zeros((image.shape[1], image.shape[2]),dtype='float32')
+            for i in range(dots.shape[0]):
+                gt_map[min(new_H-1,int(dots[i][1]))][min(new_W-1,int(dots[i][0]*scale_factor))]=1
+            gt_map = ndimage.gaussian_filter(gt_map, sigma=(1, 1), order=0)
+            gt_map = torch.from_numpy(gt_map)
+            gt_map = gt_map *60
+            
+            sample = {'image':image,'dots':dots, 'boxes':boxes, 'pos':rects, 'gt_map':gt_map}
+            return sample['image'], sample['dots'], sample['boxes'], sample['pos'] ,sample['gt_map']
+
+class ResizePreTrainImage(object):
     """
     Resize the image so that:
         1. Image is equal to 384 * 384
@@ -79,7 +172,7 @@ class resizePreTrainImage(object):
         sample = {'image':resized_image,'boxes':boxes,'gt_density':resized_density}
         return sample
 
-class resizeTrainImage(object):
+class ResizeTrainImage(object):
     """
     Resize the image so that:
         1. Image is equal to 384 * 384
@@ -90,8 +183,9 @@ class resizeTrainImage(object):
     Augmentation including Gaussian noise, Color jitter, Gaussian blur, Random affine, Random horizontal flip and Mosaic (or Random Crop if no Mosaic) is used.
     """
     
-    def __init__(self, MAX_HW=384):
+    def __init__(self, MAX_HW=384, dataset:FSC147=None):
         self.max_hw = MAX_HW
+        self.dataset = dataset
 
     def __call__(self, sample):
         image, lines_boxes, density, dots, im_id, m_flag = sample['image'], sample['lines_boxes'],sample['gt_density'], sample['dots'], sample['id'], sample['m_flag']
@@ -208,12 +302,12 @@ class resizeTrainImage(object):
                         new_TW = new_W
                         Tscale_factor = scale_factor
                     else:
-                        Tim_id = train_set[random.randint(0, len(train_set)-1)]
-                        Tdots = np.array(annotations[Tim_id]['points'])
+                        Tim_id = self.dataset.idx_running_set[random.randint(0, len(self.dataset.idx_running_set)-1)]
+                        Tdots = np.array(self.dataset.annotations[Tim_id]['points'])
                         '''while(abs(Tdots.shape[0]-dots.shape[0]<=10)):
                             Tim_id = train_set[random.randint(0, len(train_set)-1)]
                             Tdots = np.array(annotations[Tim_id]['points'])'''
-                        Timage = Image.open('{}/{}'.format(im_dir, Tim_id))
+                        Timage = Image.open('{}/{}'.format(self.dataset.im_dir, Tim_id))
                         Timage.load()
                         new_TH = 16*int(Timage.size[1]/16)
                         new_TW = 16*int(Timage.size[0]/16)
@@ -226,7 +320,7 @@ class resizeTrainImage(object):
                     r_image1 = TF.crop(r_image, start_H, start_W, length, length)
                     r_image1 = transforms.Resize((resize_l, resize_l))(r_image1)
                     r_density1 = np.zeros((resize_l,resize_l),dtype='float32')
-                    if class_dict[im_id] == class_dict[Tim_id]:
+                    if self.dataset.class_dict[im_id] == self.dataset.class_dict[Tim_id]:
                         for i in range(Tdots.shape[0]):
                             if min(new_TH-1,int(Tdots[i][1])) >= start_H and min(new_TH-1,int(Tdots[i][1])) < start_H + length and min(new_TW-1,int(Tdots[i][0]*Tscale_factor)) >= start_W and min(new_TW-1,int(Tdots[i][0]*Tscale_factor)) < start_W + length:
                                 r_density1[min(resize_l-1,int((min(new_TH-1,int(Tdots[i][1]))-start_H)*resize_l/length))][min(resize_l-1,int((min(new_TW-1,int(Tdots[i][0]*Tscale_factor))-start_W)*resize_l/length))]=1
@@ -305,5 +399,6 @@ Normalize = transforms.Compose([
         transforms.Normalize(mean=IM_NORM_MEAN, std=IM_NORM_STD)
         ])
 
-TransformTrain = transforms.Compose([resizeTrainImage(MAX_HW)])
-TransformPreTrain = transforms.Compose([resizePreTrainImage(MAX_HW)])
+#TODO Dec 13: refactor out
+# TransformTrain = transforms.Compose([ResizeTrainImage(MAX_HW)])
+# TransformPreTrain = transforms.Compose([ResizePreTrainImage(MAX_HW)])

@@ -19,7 +19,7 @@ import torchvision.transforms.functional as TF
 
 import timm
 
-assert timm.__version__ == "0.3.2"  # version check
+
 
 import util.misc as misc
 from models import models_mae_cross
@@ -93,7 +93,7 @@ def get_args_parser():
 os.environ["CUDA_LAUNCH_BLOCKING"] = '1'
 
 # load data from FSC147
-data_path = '/GPFS/data/changliu/FSC147/'
+data_path = './data/'
 anno_file = data_path + 'annotation_FSC147_384.json'
 data_split_file = data_path + 'Train_Test_Val_FSC_147.json'
 im_dir = data_path + 'images_384_VarV2'

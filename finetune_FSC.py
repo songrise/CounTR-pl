@@ -19,13 +19,12 @@ import torchvision
 
 import timm
 
-assert timm.__version__ == "0.3.2"  # version check
 import timm.optim.optim_factory as optim_factory
 
 import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 import util.lr_sched as lr_sched
-from util.FSC147 import TransformTrain
+from util.FSC147 import  FSC147
 from models import models_mae_cross
 
 
@@ -98,63 +97,6 @@ def get_args_parser():
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = '1'
 
-# load data from FSC147
-data_path = './data/'
-anno_file = data_path + 'annotation_FSC147_384.json'
-data_split_file = data_path + 'Train_Test_Val_FSC_147.json'
-class_file = data_path + 'ImageClasses_FSC147.txt'
-im_dir = data_path + 'images_384_VarV2'
-gt_dir = data_path + 'gt_density_map_adaptive_384_VarV2'
-
-with open(anno_file) as f:
-    annotations = json.load(f)
-
-with open(data_split_file) as f:
-    data_split = json.load(f)
-
-class_dict = {}
-with open(class_file) as f:
-    for line in f:
-        key = line.split()[0]
-        val = line.split()[1:]
-        class_dict[key] = val
-
-class TrainData(Dataset):
-    def __init__(self):
-        
-        self.img = data_split['train']
-        random.shuffle(self.img)
-        self.img_dir = im_dir
-
-    def __len__(self):
-        return len(self.img)
-
-    def __getitem__(self, idx):
-        im_id = self.img[idx]
-        anno = annotations[im_id]
-        bboxes = anno['box_examples_coordinates']
-
-        rects = list()
-        for bbox in bboxes:
-            x1 = bbox[0][0]
-            y1 = bbox[0][1]
-            x2 = bbox[2][0]
-            y2 = bbox[2][1]
-            rects.append([y1, x1, y2, x2])
-
-        dots = np.array(anno['points'])
-
-        image = Image.open('{}/{}'.format(im_dir, im_id))
-        image.load()
-        density_path = gt_dir + '/' + im_id.split(".jpg")[0] + ".npy"
-        density = np.load(density_path).astype('float32')   
-        m_flag = 0
-
-        sample = {'image':image,'lines_boxes':rects,'gt_density':density, 'dots':dots, 'id':im_id, 'm_flag': m_flag}
-        sample = TransformTrain(sample)
-        return sample['image'], sample['gt_density'], sample['boxes'], sample['m_flag']
-
-
 def main(args):
     misc.init_distributed_mode(args)
 
@@ -170,7 +112,7 @@ def main(args):
 
     cudnn.benchmark = True
 
-    dataset_train = TrainData()
+    dataset_train = FSC147(args.data_path, split = "train")
     print(dataset_train)
 
     if True:  # args.distributed:
