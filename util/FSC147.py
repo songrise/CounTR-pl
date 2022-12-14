@@ -21,7 +21,15 @@ IM_NORM_STD = [0.229, 0.224, 0.225]
 
 
 class FSC147(Dataset):
-    def __init__(self, data_dir:str, split:str):
+    def __init__(self, data_dir:str, split:str, subset_scale:float=1.0):
+        """
+        Parameters
+        ----------
+        data_dir : str, path to the data directory
+        split : str, 'train', 'val' or 'test'
+        todo implement this
+        subset_scale : float, scale of the subset of the dataset to use
+        """
         assert split in ['train', 'val', 'test']
 
         self.data_dir = data_dir
@@ -50,7 +58,7 @@ class FSC147(Dataset):
                 self.class_dict[key] = val
         
         self.transform = None
-        if self.split == 'train':
+        if self.split == 'train' or self.split == 'val':
             self.transform = transforms.Compose([ResizeTrainImage(MAX_HW, self)])
 
         random.shuffle(self.idx_running_set)
@@ -83,11 +91,11 @@ class FSC147(Dataset):
             sample = {'image':image,'lines_boxes':rects,'gt_density':density, 'dots':dots, 'id':im_id, 'm_flag': m_flag}
 
             sample = self.transform(sample)
-            return sample['image'], sample['gt_density'], sample['boxes'], sample['m_flag']
+            return sample['image'].float(), sample['gt_density'], sample['boxes'], sample['m_flag']
         elif self.split == "test":
             dots = np.array(anno['points'])
             image = Image.open('{}/{}'.format(self.im_dir, im_id))
-            image.load() 
+            image.load()
             W, H = image.size
 
             new_H = 16*int(H/16)
@@ -129,7 +137,7 @@ class FSC147(Dataset):
             gt_map = gt_map *60
             
             sample = {'image':image,'dots':dots, 'boxes':boxes, 'pos':rects, 'gt_map':gt_map}
-            return sample['image'], sample['dots'], sample['boxes'], sample['pos'] ,sample['gt_map']
+            return sample['image'].float(), sample['dots'], sample['boxes'], sample['pos'] ,sample['gt_map']
 
 class ResizePreTrainImage(object):
     """

@@ -2,10 +2,9 @@ ps -ef | grep tensorboard | awk '{print $2}' | xargs kill -9
 nohup tensorboard --logdir /root/autodl-tmp/CounTR/out --port 6006 &
 
 
-python -u FSC_finetune_cross.py     --epochs 1000     --blr 2e-4 --weight_decay 0.05 
 
-python -u finetune_FSC.py \
-    --epochs 1000 \
-    --blr 2e-4 --weight_decay 0.05  
+python -u finetune_FSC.py  --epochs 1000 --blr 2e-4 --weight_decay 0.05  
+
+
 
 python FSC_test_cross\(few-shot\).py --resume ckpt/checkpoint-666.pth

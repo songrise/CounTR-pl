@@ -20,7 +20,8 @@ import torch
 import torch.distributed as dist
 from torch._six import inf
 import timm
-
+import numpy as np
+import random
 
 class SmoothedValue(object):
     """Track a series of values and provide access to smoothed values over a
@@ -383,3 +384,18 @@ def all_reduce_mean(x):
         return x_reduce.item()
     else:
         return x
+
+def seed_all(seed = 42):
+      # https: // www.zhihu.com/question/542479848/answer/2567626957
+    os.environ['PYTHONHASHSEED'] = str(seed)
+
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    np.random.seed(seed)
+    random.seed(seed)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.enabled = False
