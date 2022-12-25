@@ -10,7 +10,11 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
-            "justMyCode": true
+            "justMyCode": false,
+            "args": [
+                "--batch_size",
+                "1"
+            ]
         }
     ]
 }

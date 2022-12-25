@@ -13,7 +13,7 @@ from util.pos_embed import get_2d_sincos_pos_embed
 
 class SupervisedMAE(nn.Module):
     def __init__(self, img_size=384, patch_size=16, in_chans=3,
-                 embed_dim=1024, depth=24, num_heads=16,
+                 embed_dim=1024, encoder_depth=24, num_heads=16,
                  decoder_embed_dim=512, decoder_depth=2, decoder_num_heads=16,
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False):
         super().__init__()
@@ -25,9 +25,9 @@ class SupervisedMAE(nn.Module):
 
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches , embed_dim), requires_grad=False)  # fixed sin-cos embedding
 
-        self.blocks = nn.ModuleList([
+        self.encoder_blocks = nn.ModuleList([
             Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer)
-            for i in range(depth)])
+            for i in range(encoder_depth)])
         self.norm = norm_layer(embed_dim)
         # --------------------------------------------------------------------------
 
@@ -40,25 +40,25 @@ class SupervisedMAE(nn.Module):
         self.shot_token = nn.Parameter(torch.zeros(512))
 
         # Exemplar encoder with CNN
-        self.decoder_proj1 = nn.Sequential(
+        exemplar_enc1 = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1),
             nn.InstanceNorm2d(64),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2) #[3,64,64]->[64,32,32]
         )
-        self.decoder_proj2 = nn.Sequential(
+        exemplar_enc2 = nn.Sequential(
             nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
             nn.InstanceNorm2d(128),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2) #[64,32,32]->[128,16,16]
         )
-        self.decoder_proj3 = nn.Sequential(
+        exemplar_enc3 = nn.Sequential(
             nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
             nn.InstanceNorm2d(256),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2) # [128,16,16]->[256,8,8]
         )
-        self.decoder_proj4 = nn.Sequential(
+        exemplar_enc4 = nn.Sequential(
             nn.Conv2d(256, decoder_embed_dim, kernel_size=3, stride=1, padding=1),
             nn.InstanceNorm2d(512),
             nn.ReLU(inplace=True),
@@ -66,8 +66,10 @@ class SupervisedMAE(nn.Module):
             # [256,8,8]->[512,1,1]
         )
 
+        self.encoder_exemplar = nn.ModuleList([exemplar_enc1, exemplar_enc2, exemplar_enc3, exemplar_enc4])
 
-        self.decoder_blocks = nn.ModuleList([
+        #! Dec 24: this is Feature Interaction Module (FIM)
+        self.fim_blocks = nn.ModuleList([
             CrossAttentionBlock(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer)
             for i in range(decoder_depth)])
 
@@ -129,20 +131,28 @@ class SupervisedMAE(nn.Module):
             nn.init.constant_(m.weight, 1.0)
 
     def forward_encoder(self, x):
+        """
+        input: x: images, [N, 3, 384, 384]
+        """
         # embed patches
-        x = self.patch_embed(x)
+        x = self.patch_embed(x) # [N, C, H, W] -> [N, patch_h*patch_w, D], D is embed_dim (768)
 
         # add pos embed w/o cls token
         x = x + self.pos_embed
 
         # apply Transformer blocks
-        for blk in self.blocks:
+        for blk in self.encoder_blocks:
             x = blk(x)
         x = self.norm(x)
 
         return x
 
     def forward_decoder(self, x, y_, shot_num=3):
+        """
+        input:
+            x: latent code of query image 
+            y_: the exemplar images
+        """
         # embed tokens
         x = self.decoder_embed(x)
         # add pos embed
@@ -158,21 +168,20 @@ class SupervisedMAE(nn.Module):
             cnt+=1
             if cnt > shot_num:
                 break
-            yi = self.decoder_proj1(yi)
-            yi = self.decoder_proj2(yi)
-            yi = self.decoder_proj3(yi)
-            yi = self.decoder_proj4(yi)
-            N, C,_,_ = yi.shape
+            #TODO Dec 24: refactor this
+            for blk in self.encoder_exemplar:
+                yi = blk(yi)
+            N, C, _, __ = yi.shape
             y1.append(yi.squeeze(-1).squeeze(-1)) # yi [N,C,1,1]->[N,C]       
             
         if shot_num > 0:
             y = torch.cat(y1,dim=0).reshape(shot_num,N,C).to(x.device)
-        else:
+        else: # else the [SPE] token is used
             y = self.shot_token.repeat(y_.shape[1],1).unsqueeze(0).to(x.device)
         y = y.transpose(0,1) # y [3,N,C]->[N,3,C]
         
         # apply Transformer blocks
-        for blk in self.decoder_blocks:
+        for blk in self.fim_blocks:
             x = blk(x, y)
         x = self.decoder_norm(x)
         
@@ -194,15 +203,17 @@ class SupervisedMAE(nn.Module):
         return x
 
     def forward(self, imgs, boxes, shot_num):
-        with torch.no_grad():
-            latent = self.forward_encoder(imgs)
+        #! Dec 24: ViT encoder is not trained in finetune stage
+        # with torch.no_grad():
+        #     latent = self.forward_encoder(imgs)
+        latent = self.forward_encoder(imgs)
         pred = self.forward_decoder(latent, boxes, shot_num)  # [N, 384, 384]
         return pred
 
 
 def mae_vit_base_patch16_dec512d8b(**kwargs):
     model = SupervisedMAE(
-        patch_size=16, embed_dim=768, depth=12, num_heads=12,
+        patch_size=16, embed_dim=768, encoder_depth=12, num_heads=12,
         decoder_embed_dim=512, decoder_depth=2, decoder_num_heads=16,
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
@@ -210,7 +221,7 @@ def mae_vit_base_patch16_dec512d8b(**kwargs):
 
 def mae_vit_large_patch16_dec512d8b(**kwargs):
     model = SupervisedMAE(
-        patch_size=16, embed_dim=1024, depth=24, num_heads=16,
+        patch_size=16, embed_dim=1024, encoder_depth=24, num_heads=16,
         decoder_embed_dim=512, decoder_depth=2, decoder_num_heads=16,
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
@@ -218,21 +229,21 @@ def mae_vit_large_patch16_dec512d8b(**kwargs):
 
 def mae_vit_huge_patch14_dec512d8b(**kwargs):
     model = SupervisedMAE(
-        patch_size=14, embed_dim=1280, depth=32, num_heads=16,
+        patch_size=14, embed_dim=1280, encoder_depth=32, num_heads=16,
         decoder_embed_dim=512, decoder_depth=2, decoder_num_heads=16,
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
 
 def mae_vit_base_patch16_fim4(**kwargs):
     model = SupervisedMAE(
-        patch_size=16, embed_dim=768, depth=12, num_heads=12,
+        patch_size=16, embed_dim=768, encoder_depth=12, num_heads=12,
         decoder_embed_dim=512, decoder_depth=4, decoder_num_heads=16,
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
 
 def mae_vit_base_patch16_fim6(**kwargs):
     model = SupervisedMAE(
-        patch_size=16, embed_dim=768, depth=12, num_heads=12,
+        patch_size=16, embed_dim=768, encoder_depth=12, num_heads=12,
         decoder_embed_dim=512, decoder_depth=6, decoder_num_heads=16,
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
